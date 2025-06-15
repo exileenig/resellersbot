@@ -1,0 +1,23 @@
+{
+  "Fortnite": {
+    "1 Day": 2,
+    "1 Week": 10,
+    "1 Month": 25
+  },
+  "Apex Legends": {
+    "1 Day": 2,
+    "1 Week": 10,
+    "1 Month": 25
+  },
+  "BO6": {
+    "1 Day": 3,
+    "1 Week": 15,
+    "1 Month": 35,
+    "Lifetime": 100
+  },
+  "Rust": {
+    "1 Day": 2,
+    "1 Week": 12,
+    "1 Month": 30
+  }
+}
