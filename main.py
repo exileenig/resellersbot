@@ -7,6 +7,10 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 import aiofiles
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Bot setup
 intents = discord.Intents.default()
@@ -582,7 +586,15 @@ async def generate_history(interaction: discord.Interaction):
 # Run the bot
 if __name__ == "__main__":
     token = os.getenv('DISCORD_BOT_TOKEN')
-    if not token:
-        print("Error: DISCORD_BOT_TOKEN environment variable not set")
+    if not token or token == "YOUR_ACTUAL_BOT_TOKEN_HERE":
+        print("Error: Please set a valid DISCORD_BOT_TOKEN in your .env file")
+        print("Get your token from: https://discord.com/developers/applications")
         exit(1)
-    bot.run(token)
+    
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        print("Error: Invalid Discord bot token. Please check your DISCORD_BOT_TOKEN in the .env file")
+        print("Make sure you copied the full token from https://discord.com/developers/applications")
+    except Exception as e:
+        print(f"Error starting bot: {e}")
