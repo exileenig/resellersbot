@@ -160,6 +160,39 @@ class Logger:
             except Exception as e:
                 print(f"Error sending admin log: {e}")
 
+# =========================[ AUTOCOMPLETE FUNCTIONS ]=========================
+async def product_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    products = await DataManager.get_products()
+    return [
+        app_commands.Choice(name=product, value=product)
+        for product in products.keys()
+        if current.lower() in product.lower()
+    ][:25]
+
+async def duration_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    # Get the product from the interaction if available
+    try:
+        product = interaction.namespace.product
+        products = await DataManager.get_products()
+        if product in products:
+            durations = products[product]
+        else:
+            # Fallback to all possible durations
+            config = await DataManager.get_config()
+            durations = set()
+            for product_durations in config.values():
+                durations.update(product_durations.keys())
+            durations = list(durations)
+    except:
+        # Fallback to common durations
+        durations = ["1 Day", "1 Week", "1 Month", "Lifetime"]
+    
+    return [
+        app_commands.Choice(name=duration, value=duration)
+        for duration in durations
+        if current.lower() in duration.lower()
+    ][:25]
+
 # =========================[ COPY KEYS BUTTON VIEW ]=========================
 class CopyKeysView(discord.ui.View):
     def __init__(self, keys: list[str]):
@@ -332,31 +365,33 @@ async def prices(interaction: discord.Interaction):
         user_data = await DataManager.get_user_data(str(interaction.user.id))
         
         embed = discord.Embed(
-            title="🔖 Prices",
-            description="License prices after discount",
-            color=discord.Color.blue()
+            title="💲 Current Prices",
+            description="All available products and their pricing",
+            color=discord.Color.yellow()
         )
         
         for product, durations in config.items():
             price_info = []
             for duration, price in durations.items():
+                stock_count = await StockManager.get_stock_count(product, duration)
                 if user_data["discount"] > 0:
                     discounted_price = price * (100 - user_data["discount"]) / 100
-                    price_info.append(f"> Price: ${discounted_price:.2f}\n> Duration: {duration}")
+                    original_price = f"~~${price:.2f}~~" if user_data["discount"] > 0 else ""
+                    price_info.append(f"**{duration}**\n> {original_price} ${discounted_price:.2f}\n> Stock: {stock_count} keys")
                 else:
-                    price_info.append(f"> Price: ${price:.2f}\n> Duration: {duration}")
+                    price_info.append(f"**{duration}**\n> ${price:.2f}\n> Stock: {stock_count} keys")
             
             embed.add_field(
-                name=f"**{product}**",
+                name=f"🎯 {product}",
                 value="\n".join(price_info),
-                inline=False
+                inline=True
             )
         
-        if user_data["discount"] > 0:
-            embed.set_footer(text=f"Discount: {user_data['discount']}% applied")
-        else:
-            embed.set_footer(text="No discount applied")
+        embed.add_field(name="💰 Your Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        embed.add_field(name="🎫 Your Discount", value=f"{user_data['discount']}%", inline=True)
+        embed.add_field(name="📊 Total Keys Generated", value=str(user_data['total_keys']), inline=True)
         
+        embed.set_footer(text="Powered by MyBot")
         embed.timestamp = discord.utils.utcnow()
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
@@ -379,6 +414,7 @@ async def add_product(interaction: discord.Interaction, name: str, durations: st
 
 @bot.tree.command(name="set_price", description="Set price for a product duration")
 @app_commands.describe(product="Product name", duration="Duration", price="Price in dollars")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def set_price(interaction: discord.Interaction, product: str, duration: str, price: float):
     try:
@@ -441,6 +477,7 @@ async def set_discount(interaction: discord.Interaction, user: discord.Member, p
 
 @bot.tree.command(name="stock", description="Upload stock keys from a file")
 @app_commands.describe(product="Product name", duration="Duration", file="Text file with keys (one per line)")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def stock(interaction: discord.Interaction, product: str, duration: str, file: discord.Attachment):
     try:
@@ -464,6 +501,7 @@ async def stock(interaction: discord.Interaction, product: str, duration: str, f
 
 @bot.tree.command(name="clear_stock", description="Clear all stock for a product duration")
 @app_commands.describe(product="Product name", duration="Duration")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def clear_stock(interaction: discord.Interaction, product: str, duration: str):
     try:
@@ -482,15 +520,43 @@ async def clear_stock(interaction: discord.Interaction, product: str, duration: 
 async def stock_status(interaction: discord.Interaction):
     try:
         products = await DataManager.get_products()
-        embed = discord.Embed(title="📦 Stock Status", color=0x00ff00)
+        config = await DataManager.get_config()
+        
+        embed = discord.Embed(
+            title="📦 Stock Status",
+            description="Current inventory levels for all products",
+            color=discord.Color.green()
+        )
+        
+        total_keys = 0
+        total_value = 0.0
         
         for product, durations in products.items():
             stock_info = []
             for duration in durations:
                 count = await StockManager.get_stock_count(product, duration)
-                stock_info.append(f"{duration}: {count} keys")
-            embed.add_field(name=product, value="\n".join(stock_info), inline=True)
+                total_keys += count
+                
+                # Calculate value if price exists
+                if product in config and duration in config[product]:
+                    value = count * config[product][duration]
+                    total_value += value
+                    stock_info.append(f"**{duration}**\n> Keys: {count}\n> Value: ${value:.2f}")
+                else:
+                    stock_info.append(f"**{duration}**\n> Keys: {count}\n> Value: N/A")
+            
+            embed.add_field(
+                name=f"🎯 {product}",
+                value="\n".join(stock_info),
+                inline=True
+            )
         
+        embed.add_field(name="📊 Total Keys", value=str(total_keys), inline=True)
+        embed.add_field(name="💰 Total Value", value=f"${total_value:.2f}", inline=True)
+        embed.add_field(name="📈 Products", value=str(len(products)), inline=True)
+        
+        embed.set_footer(text="Powered by MyBot")
+        embed.timestamp = discord.utils.utcnow()
         await interaction.response.send_message(embed=embed)
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting stock status: {str(e)}")
@@ -498,6 +564,7 @@ async def stock_status(interaction: discord.Interaction):
 # Reseller Commands
 @bot.tree.command(name="generate", description="Generate keys for a product")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys to generate")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 async def generate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
     try:
         if quantity <= 0 or quantity > 10:
@@ -559,6 +626,7 @@ async def my_balance(interaction: discord.Interaction):
 
 @bot.tree.command(name="estimate", description="Estimate cost for a purchase")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 async def estimate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
     try:
         config = await DataManager.get_config()
