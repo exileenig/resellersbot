@@ -7,6 +7,8 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 import aiofiles
+import logging
+import sys
 
 # Bot setup
 intents = discord.Intents.default()
@@ -139,26 +141,64 @@ class StockManager:
 
 class Logger:
     @staticmethod
-    async def log_user_action(user_id: str, action: str):
+    def setup_logging():
+        """Setup improved logging configuration"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s | %(levelname)s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.FileHandler('bot.log', encoding='utf-8')
+            ]
+        )
+        
+        # Reduce discord.py logging noise
+        logging.getLogger('discord').setLevel(logging.WARNING)
+        logging.getLogger('discord.http').setLevel(logging.WARNING)
+        
+        return logging.getLogger('bot')
+
+    @staticmethod
+    async def log_user_action(user_id: str, action: str, amount: float = None, product: str = None):
+        """Enhanced user action logging with better formatting"""
         log_file = os.path.join(LOGS_DIR, f"user_{user_id}.txt")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"[{timestamp}] {action}\n"
+        
+        # Format the log entry nicely
+        if amount and product:
+            log_entry = f"[{timestamp}] 🔑 {action} | Product: {product} | Amount: ${amount:.2f}\n"
+        elif amount:
+            log_entry = f"[{timestamp}] 💰 {action} | Amount: ${amount:.2f}\n"
+        else:
+            log_entry = f"[{timestamp}] ℹ️  {action}\n"
         
         try:
             async with aiofiles.open(log_file, 'a') as f:
                 await f.write(log_entry)
         except Exception as e:
-            print(f"Error logging user action: {e}")
+            logger.error(f"Error logging user action: {e}")
 
     @staticmethod
     async def send_admin_log(bot: commands.Bot, message: str):
+        """Send formatted admin logs"""
         if ADMIN_LOG_CHANNEL_ID:
             try:
                 channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
                 if channel:
-                    await channel.send(f"```\n{message}\n```")
+                    # Create a nice embed for admin logs
+                    embed = discord.Embed(
+                        title="🔧 Admin Log",
+                        description=f"```\n{message}\n```",
+                        color=discord.Color.orange(),
+                        timestamp=datetime.now()
+                    )
+                    await channel.send(embed=embed)
             except Exception as e:
-                print(f"Error sending admin log: {e}")
+                logger.error(f"Error sending admin log: {e}")
+
+# Initialize logger
+logger = Logger.setup_logging()
 
 # =========================[ AUTOCOMPLETE FUNCTIONS ]=========================
 async def product_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
@@ -325,13 +365,16 @@ class ConfirmGenerateView(discord.ui.View):
         await interaction.response.send_message(embed=result_embed, view=view, ephemeral=True)
         
         # Log the transaction
-        log_message = f"Generated {self.quantity}x {self.product} {self.duration} - Total: ${self.total_cost:.2f} ({self.discount}% discount applied)"
-        await Logger.log_user_action(str(self.user_id), log_message)
+        log_message = f"Generated {self.quantity}x {self.product} {self.duration} ({self.discount}% discount applied)"
+        await Logger.log_user_action(str(self.user_id), log_message, self.total_cost, f"{self.product} {self.duration}")
         
         # Admin log
-        keys_text = "\n".join([f"- {key}" for key in keys])
-        admin_log = f"[KEYS GENERATED]\nUser: {interaction.user}\nProduct: {self.product}\nDuration: {self.duration}\nQuantity: {self.quantity}\nTotal: ${self.total_cost:.2f} ({self.discount}% discount applied)\nRemaining Balance: ${user_data['balance']:.2f}\nKeys:\n{keys_text}"
+        keys_text = "\n".join([f"• {key}" for key in keys])
+        admin_log = f"[KEYS GENERATED]\n👤 User: {interaction.user.display_name} ({interaction.user.id})\n🎯 Product: {self.product} {self.duration}\n📊 Quantity: {self.quantity}\n💰 Total: ${self.total_cost:.2f} ({self.discount}% discount)\n💵 Remaining Balance: ${user_data['balance']:.2f}\n🔑 Keys Generated:\n{keys_text}"
         await Logger.send_admin_log(bot, admin_log)
+        
+        # Console log
+        logger.info(f"✅ Keys generated: {interaction.user.display_name} bought {self.quantity}x {self.product} {self.duration} for ${self.total_cost:.2f}")
 
     @discord.ui.button(label="❌ Cancel Generation", style=discord.ButtonStyle.secondary)
     async def cancel_generation(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -348,12 +391,25 @@ def is_admin():
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
+    logger.info(f'🤖 {bot.user} has connected to Discord!')
+    logger.info(f'📊 Bot is in {len(bot.guilds)} servers')
+    logger.info(f'👥 Serving {sum(guild.member_count for guild in bot.guilds)} users')
+    
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        logger.info(f'✅ Synced {len(synced)} slash command(s)')
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        logger.error(f'❌ Failed to sync commands: {e}')
+
+@bot.event
+async def on_command_error(ctx, error):
+    logger.error(f'Command error in {ctx.command}: {error}')
+
+@bot.event
+async def on_application_command_error(interaction: discord.Interaction, error):
+    logger.error(f'Slash command error in {interaction.command}: {error}')
+    if not interaction.response.is_done():
+        await interaction.response.send_message("❌ An error occurred while processing your command.", ephemeral=True)
 
 # =========================[ BALANCE SYSTEM COMMAND ]=========================
 
@@ -408,7 +464,8 @@ async def add_product(interaction: discord.Interaction, name: str, durations: st
         await DataManager.save_products(products)
         
         await interaction.response.send_message(f"✅ Added product **{name}** with durations: {', '.join(duration_list)}")
-        await Logger.send_admin_log(bot, f"PRODUCT ADDED\nName: {name}\nDurations: {', '.join(duration_list)}\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[PRODUCT ADDED]\n📦 Product: {name}\n⏱️  Durations: {', '.join(duration_list)}\n👤 By: {interaction.user.display_name}")
+        logger.info(f"➕ Product added: {name} with durations {', '.join(duration_list)} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error adding product: {str(e)}")
 
@@ -425,7 +482,8 @@ async def set_price(interaction: discord.Interaction, product: str, duration: st
         await DataManager.save_config(config)
         
         await interaction.response.send_message(f"✅ Set price for **{product} {duration}** to **${price}**")
-        await Logger.send_admin_log(bot, f"PRICE SET\nProduct: {product}\nDuration: {duration}\nPrice: ${price}\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[PRICE SET]\n🎯 Product: {product} {duration}\n💰 Price: ${price}\n👤 By: {interaction.user.display_name}")
+        logger.info(f"💲 Price set: {product} {duration} = ${price} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error setting price: {str(e)}")
 
@@ -439,7 +497,8 @@ async def add_balance(interaction: discord.Interaction, user: discord.Member, am
         await DataManager.update_user_data(str(user.id), user_data)
         
         await interaction.response.send_message(f"✅ Added **${amount}** to {user.mention}'s balance. New balance: **${user_data['balance']}**")
-        await Logger.send_admin_log(bot, f"BALANCE ADDED\nUser: {user}\nAmount: ${amount}\nNew Balance: ${user_data['balance']}\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[BALANCE ADDED]\n👤 User: {user.display_name} ({user.id})\n💰 Amount: ${amount}\n💵 New Balance: ${user_data['balance']}\n🔧 By: {interaction.user.display_name}")
+        logger.info(f"💰 Balance added: ${amount} to {user.display_name} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error adding balance: {str(e)}")
 
@@ -453,7 +512,8 @@ async def remove_balance(interaction: discord.Interaction, user: discord.Member,
         await DataManager.update_user_data(str(user.id), user_data)
         
         await interaction.response.send_message(f"✅ Removed **${amount}** from {user.mention}'s balance. New balance: **${user_data['balance']}**")
-        await Logger.send_admin_log(bot, f"BALANCE REMOVED\nUser: {user}\nAmount: ${amount}\nNew Balance: ${user_data['balance']}\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[BALANCE REMOVED]\n👤 User: {user.display_name} ({user.id})\n💰 Amount: ${amount}\n💵 New Balance: ${user_data['balance']}\n🔧 By: {interaction.user.display_name}")
+        logger.info(f"💸 Balance removed: ${amount} from {user.display_name} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error removing balance: {str(e)}")
 
@@ -471,7 +531,8 @@ async def set_discount(interaction: discord.Interaction, user: discord.Member, p
         await DataManager.update_user_data(str(user.id), user_data)
         
         await interaction.response.send_message(f"✅ Set **{percent}%** discount for {user.mention}")
-        await Logger.send_admin_log(bot, f"DISCOUNT SET\nUser: {user}\nDiscount: {percent}%\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[DISCOUNT SET]\n👤 User: {user.display_name} ({user.id})\n🎫 Discount: {percent}%\n🔧 By: {interaction.user.display_name}")
+        logger.info(f"🎫 Discount set: {percent}% for {user.display_name} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error setting discount: {str(e)}")
 
@@ -495,7 +556,8 @@ async def stock(interaction: discord.Interaction, product: str, duration: str, f
         await StockManager.add_stock(product, duration, keys)
         
         await interaction.response.send_message(f"✅ Added **{len(keys)}** keys to **{product} {duration}** stock")
-        await Logger.send_admin_log(bot, f"STOCK ADDED\nProduct: {product}\nDuration: {duration}\nKeys Added: {len(keys)}\nBy: {interaction.user}")
+        await Logger.send_admin_log(bot, f"[STOCK ADDED]\n🎯 Product: {product} {duration}\n🔑 Keys Added: {len(keys)}\n👤 By: {interaction.user.display_name}")
+        logger.info(f"📦 Stock added: {len(keys)} keys for {product} {duration} by {interaction.user.display_name}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error uploading stock: {str(e)}")
 
@@ -509,7 +571,8 @@ async def clear_stock(interaction: discord.Interaction, product: str, duration: 
         if os.path.exists(stock_file):
             os.remove(stock_file)
             await interaction.response.send_message(f"✅ Cleared stock for **{product} {duration}**")
-            await Logger.send_admin_log(bot, f"STOCK CLEARED\nProduct: {product}\nDuration: {duration}\nBy: {interaction.user}")
+            await Logger.send_admin_log(bot, f"[STOCK CLEARED]\n🎯 Product: {product} {duration}\n👤 By: {interaction.user.display_name}")
+            logger.info(f"🗑️ Stock cleared: {product} {duration} by {interaction.user.display_name}")
         else:
             await interaction.response.send_message(f"❌ No stock file found for **{product} {duration}**")
     except Exception as e:
@@ -683,15 +746,19 @@ async def generate_history(interaction: discord.Interaction):
 if __name__ == "__main__":
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
-        print("Error: Please set DISCORD_BOT_TOKEN in Replit Secrets")
-        print("Go to Tools > Secrets and add your Discord bot token")
-        print("Get your token from: https://discord.com/developers/applications")
+        logger.error("❌ DISCORD_BOT_TOKEN not found in environment variables")
+        logger.error("🔧 Please set DISCORD_BOT_TOKEN in Replit Secrets")
+        logger.error("🌐 Get your token from: https://discord.com/developers/applications")
         exit(1)
     
     try:
-        bot.run(token)
+        logger.info("🚀 Starting Discord bot...")
+        bot.run(token, log_handler=None)  # We handle logging ourselves
     except discord.LoginFailure:
-        print("Error: Invalid Discord bot token. Please check your DISCORD_BOT_TOKEN in Replit Secrets")
-        print("Make sure you copied the full token from https://discord.com/developers/applications")
+        logger.error("❌ Invalid Discord bot token")
+        logger.error("🔧 Please check your DISCORD_BOT_TOKEN in Replit Secrets")
+        logger.error("🌐 Make sure you copied the full token from https://discord.com/developers/applications")
+    except KeyboardInterrupt:
+        logger.info("⏹️ Bot shutdown requested by user")
     except Exception as e:
-        print(f"Error starting bot: {e}")
+        logger.error(f"💥 Error starting bot: {e}")
