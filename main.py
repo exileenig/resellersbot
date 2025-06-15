@@ -525,28 +525,6 @@ async def my_balance(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting balance: {str(e)}")
 
-@bot.tree.command(name="prices", description="View all current prices")
-async def prices(interaction: discord.Interaction):
-    try:
-        config = await DataManager.get_config()
-        user_data = await DataManager.get_user_data(str(interaction.user.id))
-        
-        embed = discord.Embed(title="💲 Current Prices", color=0x0099ff)
-        
-        for product, durations in config.items():
-            price_info = []
-            for duration, price in durations.items():
-                discounted_price = price * (100 - user_data["discount"]) / 100
-                price_info.append(f"{duration}: ${price:.2f} → ${discounted_price:.2f}")
-            embed.add_field(name=product, value="\n".join(price_info), inline=True)
-        
-        if user_data["discount"] > 0:
-            embed.set_footer(text=f"Prices shown with your {user_data['discount']}% discount applied")
-        
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Error getting prices: {str(e)}")
-
 @bot.tree.command(name="estimate", description="Estimate cost for a purchase")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys")
 async def estimate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
