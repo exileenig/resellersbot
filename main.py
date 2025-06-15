@@ -203,6 +203,72 @@ class CopyKeysView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# =========================[ QUICK BUY VIEW ]=========================
+class QuickBuyView(discord.ui.View):
+    def __init__(self, user_data: dict):
+        super().__init__(timeout=180)
+        self.user_data = user_data
+        self.add_quick_buy_buttons()
+    
+    async def add_quick_buy_buttons(self):
+        try:
+            config = await DataManager.get_config()
+            products = await DataManager.get_products()
+            
+            # Add buttons for popular products
+            popular_combos = [
+                ("Fortnite", "1 Day"),
+                ("BO6", "1 Week"),
+                ("Apex Legends", "1 Day"),
+                ("Rust", "1 Month")
+            ]
+            
+            for product, duration in popular_combos:
+                if product in config and duration in config[product]:
+                    price = config[product][duration] * (100 - self.user_data["discount"]) / 100
+                    button = discord.ui.Button(
+                        label=f"{product} {duration} - ${price:.2f}",
+                        style=discord.ButtonStyle.secondary,
+                        emoji="⚡"
+                    )
+                    button.callback = self.create_quick_buy_callback(product, duration, price)
+                    self.add_item(button)
+        except Exception as e:
+            print(f"Error adding quick buy buttons: {e}")
+    
+    def create_quick_buy_callback(self, product: str, duration: str, price: float):
+        async def callback(interaction: discord.Interaction):
+            # Check stock first
+            stock_count = await StockManager.get_stock_count(product, duration)
+            if stock_count < 1:
+                await interaction.response.send_message(f"❌ **{product} {duration}** is out of stock!", ephemeral=True)
+                return
+            
+            # Check balance
+            if self.user_data["balance"] < price:
+                await interaction.response.send_message(f"❌ Insufficient balance! Need ${price:.2f}, have ${self.user_data['balance']:.2f}", ephemeral=True)
+                return
+            
+            # Create confirmation view
+            view = ConfirmGenerateView(
+                interaction.user.id, product, duration, 1, 
+                price / (100 - self.user_data["discount"]) * 100,  # Calculate base price
+                price, self.user_data["discount"]
+            )
+            
+            embed = discord.Embed(
+                title="⚡ Quick Buy Confirmation",
+                description=f"Purchase **1x {product} {duration}** for **${price:.2f}**?",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Stock Available", value=f"{stock_count} keys", inline=True)
+            embed.add_field(name="Your Balance", value=f"${self.user_data['balance']:.2f}", inline=True)
+            embed.add_field(name="After Purchase", value=f"${self.user_data['balance'] - price:.2f}", inline=True)
+            
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+        return callback
+
 # =========================[ CONFIRM GENERATE VIEW ]=========================
 class ConfirmGenerateView(discord.ui.View):
     def __init__(self, user_id: int, product: str, duration: str, quantity: int, 
@@ -325,42 +391,66 @@ async def on_ready():
 # =========================[ BALANCE SYSTEM COMMAND ]=========================
 
 # =========================[ PRICES COMMAND ]=========================
-@bot.tree.command(name="prices", description="View all current prices 💲")
+@bot.tree.command(name="prices", description="View all current prices with stock info 💲")
 async def prices(interaction: discord.Interaction):
     try:
         config = await DataManager.get_config()
         user_data = await DataManager.get_user_data(str(interaction.user.id))
         
         embed = discord.Embed(
-            title="🔖 Prices",
-            description="License prices after discount",
+            title="💰 Price List & Stock",
+            description="All prices with current stock levels",
             color=discord.Color.blue()
         )
         
+        total_savings = 0
+        
         for product, durations in config.items():
             price_info = []
-            for duration, price in durations.items():
+            for duration, base_price in durations.items():
+                # Get stock status
+                stock_count = await StockManager.get_stock_count(product, duration)
+                stock_emoji = "🟢" if stock_count > 10 else "🟡" if stock_count > 0 else "🔴"
+                
                 if user_data["discount"] > 0:
-                    discounted_price = price * (100 - user_data["discount"]) / 100
-                    price_info.append(f"> Price: ${discounted_price:.2f}\n> Duration: {duration}")
+                    discounted_price = base_price * (100 - user_data["discount"]) / 100
+                    savings = base_price - discounted_price
+                    total_savings += savings
+                    price_info.append(f"{stock_emoji} **{duration}**\n💰 ~~${base_price:.2f}~~ **${discounted_price:.2f}**\n📦 Stock: {stock_count}")
                 else:
-                    price_info.append(f"> Price: ${price:.2f}\n> Duration: {duration}")
+                    price_info.append(f"{stock_emoji} **{duration}**\n💰 **${base_price:.2f}**\n📦 Stock: {stock_count}")
             
             embed.add_field(
-                name=f"**{product}**",
-                value="\n".join(price_info),
+                name=f"🎮 **{product}**",
+                value="\n\n".join(price_info),
+                inline=True
+            )
+        
+        # Add discount info at bottom
+        if user_data["discount"] > 0:
+            embed.add_field(
+                name="🎯 Your Benefits",
+                value=f"**Discount:** {user_data['discount']}%\n**Potential Savings:** ${total_savings:.2f}\n**Balance:** ${user_data['balance']:.2f}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="💰 Your Account",
+                value=f"**Balance:** ${user_data['balance']:.2f}\n**Discount:** None",
                 inline=False
             )
         
-        if user_data["discount"] > 0:
-            embed.set_footer(text=f"Discount: {user_data['discount']}% applied")
-        else:
-            embed.set_footer(text="No discount applied")
+        embed.add_field(
+            name="📊 Stock Legend",
+            value="🟢 High Stock (10+) • 🟡 Low Stock (1-9) • 🔴 Out of Stock",
+            inline=False
+        )
         
+        embed.set_footer(text="💡 Use /quick_buy for instant purchases!")
         embed.timestamp = discord.utils.utcnow()
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error getting prices: {str(e)}")
+        await interaction.response.send_message(f"❌ Error getting prices: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="add_product", description="Add a new product with durations")
 @app_commands.describe(name="Product name", durations="Comma-separated durations (e.g., 1Day,1Week,1Month)")
@@ -379,6 +469,7 @@ async def add_product(interaction: discord.Interaction, name: str, durations: st
 
 @bot.tree.command(name="set_price", description="Set price for a product duration")
 @app_commands.describe(product="Product name", duration="Duration", price="Price in dollars")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def set_price(interaction: discord.Interaction, product: str, duration: str, price: float):
     try:
@@ -441,6 +532,7 @@ async def set_discount(interaction: discord.Interaction, user: discord.Member, p
 
 @bot.tree.command(name="stock", description="Upload stock keys from a file")
 @app_commands.describe(product="Product name", duration="Duration", file="Text file with keys (one per line)")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def stock(interaction: discord.Interaction, product: str, duration: str, file: discord.Attachment):
     try:
@@ -464,6 +556,7 @@ async def stock(interaction: discord.Interaction, product: str, duration: str, f
 
 @bot.tree.command(name="clear_stock", description="Clear all stock for a product duration")
 @app_commands.describe(product="Product name", duration="Duration")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 @is_admin()
 async def clear_stock(interaction: discord.Interaction, product: str, duration: str):
     try:
@@ -495,9 +588,48 @@ async def stock_status(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting stock status: {str(e)}")
 
+# Autocomplete functions for generate command
+async def product_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    try:
+        products = await DataManager.get_products()
+        choices = []
+        for product_name in products.keys():
+            if current.lower() in product_name.lower():
+                choices.append(app_commands.Choice(name=product_name, value=product_name))
+        return choices[:25]  # Discord limit
+    except:
+        return []
+
+async def duration_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    try:
+        products = await DataManager.get_products()
+        # Get the product from the current interaction
+        product = None
+        for option in interaction.data.get('options', []):
+            if option['name'] == 'product':
+                product = option['value']
+                break
+        
+        if product and product in products:
+            choices = []
+            for duration in products[product]:
+                if current.lower() in duration.lower():
+                    choices.append(app_commands.Choice(name=duration, value=duration))
+            return choices[:25]  # Discord limit
+        return []
+    except:
+        return []
+
 # Reseller Commands
 @bot.tree.command(name="generate", description="Generate keys for a product")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys to generate")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 async def generate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
     try:
         if quantity <= 0 or quantity > 10:
@@ -507,13 +639,42 @@ async def generate(interaction: discord.Interaction, product: str, duration: str
         # Check if product and duration exist
         products = await DataManager.get_products()
         if product not in products or duration not in products[product]:
-            await interaction.response.send_message(f"❌ Product **{product}** with duration **{duration}** not found")
+            embed = discord.Embed(
+                title="❌ Invalid Product/Duration",
+                description=f"Product **{product}** with duration **{duration}** not found",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Available Products", value="\n".join(products.keys()), inline=False)
+            if product in products:
+                embed.add_field(name=f"Available Durations for {product}", value="\n".join(products[product]), inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # Check stock availability first
+        stock_count = await StockManager.get_stock_count(product, duration)
+        if stock_count < quantity:
+            embed = discord.Embed(
+                title="❌ Insufficient Stock",
+                description=f"Not enough keys available for **{product} {duration}**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Requested", value=str(quantity), inline=True)
+            embed.add_field(name="Available", value=str(stock_count), inline=True)
+            embed.add_field(name="💡 Tip", value="Try reducing the quantity or contact an admin", inline=False)
+            embed.set_footer(text="Stock levels update in real-time")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Get pricing
         config = await DataManager.get_config()
         if product not in config or duration not in config[product]:
-            await interaction.response.send_message(f"❌ No price set for **{product} {duration}**")
+            embed = discord.Embed(
+                title="❌ Pricing Error",
+                description=f"No price set for **{product} {duration}**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="💡 Solution", value="Contact an admin to set up pricing", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         base_price = config[product][duration]
@@ -528,15 +689,33 @@ async def generate(interaction: discord.Interaction, product: str, duration: str
         
         embed = discord.Embed(
             title="🔑 Confirm License Generation",
-            description=f"Are you sure you want to generate **{quantity}x {product} {duration}** licenses?",
-            color=discord.Color.yellow()
+            description=f"Ready to generate **{quantity}x {product} {duration}** licenses?",
+            color=discord.Color.gold()
         )
-        embed.add_field(name="Base Price", value=f"${base_price:.2f} each", inline=True)
-        embed.add_field(name="Quantity", value=str(quantity), inline=True)
-        embed.add_field(name="Discount", value=f"{user_data['discount']}%", inline=True)
-        embed.add_field(name="Total Cost", value=f"${total_cost:.2f}", inline=True)
-        embed.add_field(name="Your Balance", value=f"${user_data['balance']:.2f}", inline=True)
-        embed.set_footer(text="Powered by MyBot")
+        
+        # Product info section
+        embed.add_field(name="📦 Product", value=f"**{product}**", inline=True)
+        embed.add_field(name="⏱️ Duration", value=f"**{duration}**", inline=True)
+        embed.add_field(name="🔢 Quantity", value=f"**{quantity}**", inline=True)
+        
+        # Pricing section
+        base_total = base_price * quantity
+        embed.add_field(name="💰 Base Price", value=f"${base_price:.2f} each\n${base_total:.2f} total", inline=True)
+        embed.add_field(name="🎯 Your Discount", value=f"**{user_data['discount']}%**", inline=True)
+        embed.add_field(name="💳 Final Cost", value=f"**${total_cost:.2f}**", inline=True)
+        
+        # Balance info
+        remaining_balance = user_data['balance'] - total_cost
+        balance_status = "✅" if remaining_balance >= 0 else "❌"
+        embed.add_field(name="💰 Current Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        embed.add_field(name="💰 After Purchase", value=f"{balance_status} ${remaining_balance:.2f}", inline=True)
+        embed.add_field(name="📊 Stock Available", value=f"**{stock_count}** keys", inline=True)
+        
+        if user_data['discount'] > 0:
+            savings = base_total - total_cost
+            embed.add_field(name="💸 You Save", value=f"**${savings:.2f}**", inline=False)
+        
+        embed.set_footer(text="⚡ Keys will be generated instantly after confirmation")
         embed.timestamp = discord.utils.utcnow()
         
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -557,8 +736,68 @@ async def my_balance(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting balance: {str(e)}")
 
+@bot.tree.command(name="quick_buy", description="Quick purchase menu for popular products")
+async def quick_buy(interaction: discord.Interaction):
+    try:
+        config = await DataManager.get_config()
+        user_data = await DataManager.get_user_data(str(interaction.user.id))
+        
+        embed = discord.Embed(
+            title="⚡ Quick Buy Menu",
+            description="Select a product for instant purchase",
+            color=discord.Color.blue()
+        )
+        
+        view = QuickBuyView(user_data)
+        
+        # Add popular products info
+        popular_products = []
+        for product, durations in list(config.items())[:3]:  # Show top 3 products
+            cheapest_duration = min(durations.items(), key=lambda x: x[1])
+            price = cheapest_duration[1] * (100 - user_data["discount"]) / 100
+            popular_products.append(f"**{product}** - {cheapest_duration[0]} (${price:.2f})")
+        
+        embed.add_field(name="🔥 Popular Products", value="\n".join(popular_products), inline=False)
+        embed.add_field(name="💰 Your Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        embed.add_field(name="🎯 Your Discount", value=f"{user_data['discount']}%", inline=True)
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error loading quick buy: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="stock_check", description="Check stock levels for all products")
+async def stock_check(interaction: discord.Interaction):
+    try:
+        products = await DataManager.get_products()
+        embed = discord.Embed(
+            title="📊 Stock Levels",
+            description="Current availability for all products",
+            color=discord.Color.blue()
+        )
+        
+        for product, durations in products.items():
+            stock_info = []
+            for duration in durations:
+                count = await StockManager.get_stock_count(product, duration)
+                status = "🟢" if count > 10 else "🟡" if count > 0 else "🔴"
+                stock_info.append(f"{status} {duration}: {count}")
+            
+            embed.add_field(
+                name=f"**{product}**",
+                value="\n".join(stock_info),
+                inline=True
+            )
+        
+        embed.set_footer(text="🟢 High Stock • 🟡 Low Stock • 🔴 Out of Stock")
+        embed.timestamp = discord.utils.utcnow()
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error checking stock: {str(e)}", ephemeral=True)
+
 @bot.tree.command(name="estimate", description="Estimate cost for a purchase")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys")
+@app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 async def estimate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
     try:
         config = await DataManager.get_config()
