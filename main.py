@@ -14,8 +14,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Configuration
-ADMIN_ROLE = "Admin"  # Change this to your admin role name
-ADMIN_LOG_CHANNEL_ID = None  # Set this to your admin log channel ID
+ADMIN_ROLE = os.getenv("ADMIN_ROLE", "Admin")
+ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID")) if os.getenv("ADMIN_LOG_CHANNEL_ID") else None
 DATA_DIR = "data"
 STOCK_DIR = "stock"
 LOGS_DIR = "data/logs"
@@ -156,7 +156,7 @@ class Logger:
             try:
                 channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
                 if channel:
-                    await channel.send(f"\`\`\`\n{message}\n\`\`\`")
+                    await channel.send(f"```\n{message}\n```")
             except Exception as e:
                 print(f"Error sending admin log: {e}")
 
@@ -169,7 +169,7 @@ class CopyKeysView(discord.ui.View):
     @discord.ui.button(label="📋 Copy all keys", style=discord.ButtonStyle.primary)
     async def copy_all(self, interaction: discord.Interaction, button: discord.ui.Button):
         all_keys = "\n".join(self.keys)
-        await interaction.response.send_message(f"> Generated license keys:\n\`\`\`{all_keys}\`\`\`\n", ephemeral=True)
+        await interaction.response.send_message(f"> Generated license keys:\n```{all_keys}```\n", ephemeral=True)
 
 # =========================[ CONFIRM GENERATE VIEW ]=========================
 class ConfirmGenerateView(discord.ui.View):
@@ -245,7 +245,7 @@ class ConfirmGenerateView(discord.ui.View):
         for i, key in enumerate(keys):
             result_embed.add_field(
                 name=f"Key {i+1}",
-                value=f"\n\`\`\`{key}\`\`\`\n",
+                value=f"\n```{key}```\n",
                 inline=False
             )
         
@@ -291,19 +291,6 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 # =========================[ BALANCE SYSTEM COMMAND ]=========================
-@bot.tree.command(name="my_balance", description="Check your current balance 💰")
-async def my_balance(interaction: discord.Interaction):
-    user_data = await DataManager.get_user_data(str(interaction.user.id))
-    embed = discord.Embed(
-        title="💰 Your Balance",
-        description=f"${user_data['balance']:.2f}",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Total Keys Generated", value=str(user_data['total_keys']), inline=True)
-    embed.add_field(name="Discount", value=f"{user_data['discount']}%", inline=True)
-    embed.timestamp = discord.utils.utcnow()
-    embed.set_footer(text="Powered by MyBot")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================[ PRICES COMMAND ]=========================
 @bot.tree.command(name="prices", description="View all current prices 💲")
@@ -609,12 +596,15 @@ async def generate_history(interaction: discord.Interaction):
             file = discord.File(log_file, filename=f"purchase_history_{interaction.user.id}.txt")
             await interaction.response.send_message("📋 Your purchase history:", file=file, ephemeral=True)
         else:
-            await interaction.response.send_message(f"📋 **Your Purchase History:**\n\`\`\`\n{content}\n\`\`\`", ephemeral=True)
+            await interaction.response.send_message(f"📋 **Your Purchase History:**\n```\n{content}\n```", ephemeral=True)
             
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting history: {str(e)}")
 
 # Run the bot
 if __name__ == "__main__":
-    # Replace with your bot token
-    bot.run('YOUR_BOT_TOKEN_HERE')
+    token = os.getenv('DISCORD_BOT_TOKEN')
+    if not token:
+        print("Error: DISCORD_BOT_TOKEN environment variable not set")
+        exit(1)
+    bot.run(token)

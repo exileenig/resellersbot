@@ -2,3 +2,15 @@ modules = ["python-3.12"]
 
 [nix]
 channel = "stable-24_05"
+
+[workflows]
+runButton = "Discord Bot"
+
+[[workflows.workflow]]
+name = "Discord Bot"
+author = 24366464
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
