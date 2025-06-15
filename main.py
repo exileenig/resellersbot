@@ -373,7 +373,243 @@ class ConfirmGenerateView(discord.ui.View):
             return
         await interaction.response.send_message("License generation cancelled.", ephemeral=True)
 
-# =========================[ PAGINATOR VIEW ]=========================
+# =========================[ DROPDOWN SELECTION VIEWS ]=========================
+class ProductSelect(discord.ui.Select):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        super().__init__(placeholder="Choose a product...")
+        
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You cannot use this selection.", ephemeral=True)
+            return
+            
+        selected_product = self.values[0]
+        view = DurationSelectView(self.user_id, selected_product)
+        await view.populate_durations()
+        
+        embed = discord.Embed(
+            title=f"🎮 {selected_product}",
+            description="Now select a duration:",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class ProductSelectView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        
+    async def populate_products(self):
+        try:
+            config = await DataManager.get_config()
+            
+            select = ProductSelect(self.user_id)
+            
+            for product in list(config.keys())[:25]:  # Discord limit
+                select.add_option(
+                    label=product,
+                    value=product,
+                    emoji="🎮"
+                )
+            
+            self.add_item(select)
+        except Exception as e:
+            print(f"Error populating products: {e}")
+
+class DurationSelect(discord.ui.Select):
+    def __init__(self, user_id: int, product: str):
+        self.user_id = user_id
+        self.product = product
+        super().__init__(placeholder="Choose a duration...")
+        
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You cannot use this selection.", ephemeral=True)
+            return
+            
+        selected_duration = self.values[0]
+        view = QuantitySelectView(self.user_id, self.product, selected_duration)
+        
+        # Get pricing info
+        config = await DataManager.get_config()
+        user_data = await DataManager.get_user_data(str(self.user_id))
+        base_price = config[self.product][selected_duration]
+        
+        embed = discord.Embed(
+            title=f"🎮 {self.product} - {selected_duration}",
+            description="Now select quantity:",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="💰 Base Price", value=f"${base_price:.2f}", inline=True)
+        embed.add_field(name="🎯 Your Discount", value=f"{user_data['discount']}%", inline=True)
+        
+        # Check stock
+        stock_count = await StockManager.get_stock_count(self.product, selected_duration)
+        embed.add_field(name="📦 Stock", value=f"{stock_count} available", inline=True)
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class DurationSelectView(discord.ui.View):
+    def __init__(self, user_id: int, product: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.product = product
+        
+    async def populate_durations(self):
+        try:
+            config = await DataManager.get_config()
+            
+            if self.product in config:
+                select = DurationSelect(self.user_id, self.product)
+                
+                for duration, price in config[self.product].items():
+                    # Check stock for visual indicator
+                    stock_count = await StockManager.get_stock_count(self.product, duration)
+                    stock_emoji = "🟢" if stock_count > 10 else "🟡" if stock_count > 0 else "🔴"
+                    
+                    select.add_option(
+                        label=f"{duration} - ${price:.2f}",
+                        value=duration,
+                        description=f"Stock: {stock_count}",
+                        emoji=stock_emoji
+                    )
+                
+                self.add_item(select)
+        except Exception as e:
+            print(f"Error populating durations: {e}")
+
+class QuantitySelect(discord.ui.Select):
+    def __init__(self, user_id: int, product: str, duration: str):
+        self.user_id = user_id
+        self.product = product
+        self.duration = duration
+        super().__init__(placeholder="Choose quantity...")
+        
+        # Add quantity options 1-10
+        for i in range(1, 11):
+            self.add_option(
+                label=f"{i} key{'s' if i > 1 else ''}",
+                value=str(i),
+                emoji="🔢"
+            )
+        
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You cannot use this selection.", ephemeral=True)
+            return
+            
+        quantity = int(self.values[0])
+        
+        # Get pricing and user data
+        config = await DataManager.get_config()
+        user_data = await DataManager.get_user_data(str(self.user_id))
+        base_price = config[self.product][self.duration]
+        
+        # Calculate total cost with discount
+        discount_multiplier = (100 - user_data["discount"]) / 100
+        total_cost = base_price * quantity * discount_multiplier
+        
+        # Check stock availability
+        stock_count = await StockManager.get_stock_count(self.product, self.duration)
+        if stock_count < quantity:
+            embed = discord.Embed(
+                title="❌ Insufficient Stock",
+                description=f"Not enough keys available for **{self.product} {self.duration}**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Requested", value=str(quantity), inline=True)
+            embed.add_field(name="Available", value=str(stock_count), inline=True)
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+        
+        # Create confirmation view
+        view = ConfirmGenerateView(
+            self.user_id, self.product, self.duration, quantity, 
+            base_price, total_cost, user_data["discount"]
+        )
+        
+        embed = discord.Embed(
+            title="🔑 Confirm License Generation",
+            description=f"Ready to generate **{quantity}x {self.product} {self.duration}** licenses?",
+            color=discord.Color.gold()
+        )
+        
+        # Product info section
+        embed.add_field(name="📦 Product", value=f"**{self.product}**", inline=True)
+        embed.add_field(name="⏱️ Duration", value=f"**{self.duration}**", inline=True)
+        embed.add_field(name="🔢 Quantity", value=f"**{quantity}**", inline=True)
+        
+        # Pricing section
+        base_total = base_price * quantity
+        embed.add_field(name="💰 Base Price", value=f"${base_price:.2f} each\n${base_total:.2f} total", inline=True)
+        embed.add_field(name="🎯 Your Discount", value=f"**{user_data['discount']}%**", inline=True)
+        embed.add_field(name="💳 Final Cost", value=f"**${total_cost:.2f}**", inline=True)
+        
+        # Balance info
+        remaining_balance = user_data['balance'] - total_cost
+        balance_status = "✅" if remaining_balance >= 0 else "❌"
+        embed.add_field(name="💰 Current Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        embed.add_field(name="💰 After Purchase", value=f"{balance_status} ${remaining_balance:.2f}", inline=True)
+        embed.add_field(name="📊 Stock Available", value=f"**{stock_count}** keys", inline=True)
+        
+        if user_data['discount'] > 0:
+            savings = base_total - total_cost
+            embed.add_field(name="💸 You Save", value=f"**${savings:.2f}**", inline=False)
+        
+        embed.set_footer(text="⚡ Keys will be generated instantly after confirmation")
+        embed.timestamp = discord.utils.utcnow()
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class QuantitySelectView(discord.ui.View):
+    def __init__(self, user_id: int, product: str, duration: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.product = product
+        self.duration = duration
+        self.add_item(QuantitySelect(user_id, product, duration))
+
+# =========================[ AUTOCOMPLETE FUNCTIONS ]=========================
+async def product_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    try:
+        config = await DataManager.get_config()
+        choices = []
+        for product_name in config.keys():
+            if current.lower() in product_name.lower():
+                choices.append(app_commands.Choice(name=product_name, value=product_name))
+        return choices[:25]  # Discord limit
+    except:
+        return []
+
+async def duration_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    try:
+        config = await DataManager.get_config()
+        # Get the product from the current interaction
+        product = None
+        for option in interaction.data.get('options', []):
+            if option['name'] == 'product':
+                product = option['value']
+                break
+        
+        if product and product in config:
+            choices = []
+            for duration in config[product].keys():
+                if current.lower() in duration.lower():
+                    choices.append(app_commands.Choice(name=duration, value=duration))
+            return choices[:25]  # Discord limit
+        return []
+    except:
+        return []
+
+# =========================[ ADMIN CHECK ]=========================
 def is_admin():
     async def predicate(interaction: discord.Interaction) -> bool:
         return any(role.name == ADMIN_ROLE for role in interaction.user.roles)
@@ -452,18 +688,23 @@ async def prices(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting prices: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="add_product", description="Add a new product with durations")
-@app_commands.describe(name="Product name", durations="Comma-separated durations (e.g., 1Day,1Week,1Month)")
+@bot.tree.command(name="add_product", description="Add a new product with durations and default prices")
+@app_commands.describe(name="Product name", durations="Comma-separated durations (e.g., 1 Day,1 Week,1 Month)", default_price="Default price for all durations")
 @is_admin()
-async def add_product(interaction: discord.Interaction, name: str, durations: str):
+async def add_product(interaction: discord.Interaction, name: str, durations: str, default_price: float = 5.0):
     try:
-        products = await DataManager.get_products()
+        config = await DataManager.get_config()
         duration_list = [d.strip() for d in durations.split(',')]
-        products[name] = duration_list
-        await DataManager.save_products(products)
         
-        await interaction.response.send_message(f"✅ Added product **{name}** with durations: {', '.join(duration_list)}")
-        await Logger.send_admin_log(bot, f"PRODUCT ADDED\nName: {name}\nDurations: {', '.join(duration_list)}\nBy: {interaction.user}")
+        # Add product with default prices
+        config[name] = {}
+        for duration in duration_list:
+            config[name][duration] = default_price
+        
+        await DataManager.save_config(config)
+        
+        await interaction.response.send_message(f"✅ Added product **{name}** with durations: {', '.join(duration_list)} (${default_price:.2f} each)")
+        await Logger.send_admin_log(bot, f"PRODUCT ADDED\nName: {name}\nDurations: {', '.join(duration_list)}\nDefault Price: ${default_price:.2f}\nBy: {interaction.user}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Error adding product: {str(e)}")
 
@@ -574,12 +815,12 @@ async def clear_stock(interaction: discord.Interaction, product: str, duration: 
 @is_admin()
 async def stock_status(interaction: discord.Interaction):
     try:
-        products = await DataManager.get_products()
+        config = await DataManager.get_config()
         embed = discord.Embed(title="📦 Stock Status", color=0x00ff00)
         
-        for product, durations in products.items():
+        for product, durations in config.items():
             stock_info = []
-            for duration in durations:
+            for duration in durations.keys():
                 count = await StockManager.get_stock_count(product, duration)
                 stock_info.append(f"{duration}: {count} keys")
             embed.add_field(name=product, value="\n".join(stock_info), inline=True)
@@ -588,46 +829,33 @@ async def stock_status(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting stock status: {str(e)}")
 
-# Autocomplete functions for generate command
-async def product_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-) -> List[app_commands.Choice[str]]:
-    try:
-        products = await DataManager.get_products()
-        choices = []
-        for product_name in products.keys():
-            if current.lower() in product_name.lower():
-                choices.append(app_commands.Choice(name=product_name, value=product_name))
-        return choices[:25]  # Discord limit
-    except:
-        return []
 
-async def duration_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-) -> List[app_commands.Choice[str]]:
-    try:
-        products = await DataManager.get_products()
-        # Get the product from the current interaction
-        product = None
-        for option in interaction.data.get('options', []):
-            if option['name'] == 'product':
-                product = option['value']
-                break
-        
-        if product and product in products:
-            choices = []
-            for duration in products[product]:
-                if current.lower() in duration.lower():
-                    choices.append(app_commands.Choice(name=duration, value=duration))
-            return choices[:25]  # Discord limit
-        return []
-    except:
-        return []
 
 # Reseller Commands
-@bot.tree.command(name="generate", description="Generate keys for a product")
+@bot.tree.command(name="generate_dropdown", description="Generate keys using easy dropdown menus")
+async def generate_dropdown(interaction: discord.Interaction):
+    try:
+        config = await DataManager.get_config()
+        
+        if not config:
+            await interaction.response.send_message("❌ No products available. Contact an admin.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="🔑 License Generator",
+            description="Select a product to get started:",
+            color=discord.Color.blue()
+        )
+        
+        view = ProductSelectView(interaction.user.id)
+        await view.populate_products()
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error loading generator: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="generate", description="Generate keys for a product (legacy command)")
 @app_commands.describe(product="Product name", duration="Duration", quantity="Number of keys to generate")
 @app_commands.autocomplete(product=product_autocomplete, duration=duration_autocomplete)
 async def generate(interaction: discord.Interaction, product: str, duration: str, quantity: int = 1):
@@ -637,16 +865,16 @@ async def generate(interaction: discord.Interaction, product: str, duration: str
             return
         
         # Check if product and duration exist
-        products = await DataManager.get_products()
-        if product not in products or duration not in products[product]:
+        config = await DataManager.get_config()
+        if product not in config or duration not in config[product]:
             embed = discord.Embed(
                 title="❌ Invalid Product/Duration",
                 description=f"Product **{product}** with duration **{duration}** not found",
                 color=discord.Color.red()
             )
-            embed.add_field(name="Available Products", value="\n".join(products.keys()), inline=False)
-            if product in products:
-                embed.add_field(name=f"Available Durations for {product}", value="\n".join(products[product]), inline=False)
+            embed.add_field(name="Available Products", value="\n".join(config.keys()), inline=False)
+            if product in config:
+                embed.add_field(name=f"Available Durations for {product}", value="\n".join(config[product].keys()), inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
@@ -665,17 +893,7 @@ async def generate(interaction: discord.Interaction, product: str, duration: str
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        # Get pricing
-        config = await DataManager.get_config()
-        if product not in config or duration not in config[product]:
-            embed = discord.Embed(
-                title="❌ Pricing Error",
-                description=f"No price set for **{product} {duration}**",
-                color=discord.Color.red()
-            )
-            embed.add_field(name="💡 Solution", value="Contact an admin to set up pricing", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+        
         
         base_price = config[product][duration]
         user_data = await DataManager.get_user_data(str(interaction.user.id))
@@ -768,16 +986,16 @@ async def quick_buy(interaction: discord.Interaction):
 @bot.tree.command(name="stock_check", description="Check stock levels for all products")
 async def stock_check(interaction: discord.Interaction):
     try:
-        products = await DataManager.get_products()
+        config = await DataManager.get_config()
         embed = discord.Embed(
             title="📊 Stock Levels",
             description="Current availability for all products",
             color=discord.Color.blue()
         )
         
-        for product, durations in products.items():
+        for product, durations in config.items():
             stock_info = []
-            for duration in durations:
+            for duration in durations.keys():
                 count = await StockManager.get_stock_count(product, duration)
                 status = "🟢" if count > 10 else "🟡" if count > 0 else "🔴"
                 stock_info.append(f"{status} {duration}: {count}")
