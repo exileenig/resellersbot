@@ -172,7 +172,7 @@ class CopyKeysView(discord.ui.View):
         
         embed = discord.Embed(
             title="📋 All Generated Keys",
-            description="Here are all your generated license keys:",
+            description="Here are all your generated license keys (raw format):",
             color=discord.Color.blue()
         )
         
@@ -181,15 +181,14 @@ class CopyKeysView(discord.ui.View):
         current_chunk = []
         current_length = 0
         
-        for i, key in enumerate(self.keys):
-            key_line = f"{i+1}. {key}"
-            if current_length + len(key_line) > 1000:  # Discord embed field limit
+        for key in self.keys:
+            if current_length + len(key) > 1000:  # Discord embed field limit
                 key_chunks.append("\n".join(current_chunk))
-                current_chunk = [key_line]
-                current_length = len(key_line)
+                current_chunk = [key]
+                current_length = len(key)
             else:
-                current_chunk.append(key_line)
-                current_length += len(key_line) + 1
+                current_chunk.append(key)
+                current_length += len(key) + 1
         
         if current_chunk:
             key_chunks.append("\n".join(current_chunk))
@@ -199,7 +198,7 @@ class CopyKeysView(discord.ui.View):
             field_name = "License Keys" if i == 0 else f"License Keys (continued {i+1})"
             embed.add_field(name=field_name, value=f"```\n{chunk}\n```", inline=False)
         
-        embed.set_footer(text="Copy the keys you need from above")
+        embed.set_footer(text="Copy the raw keys from above")
         embed.timestamp = discord.utils.utcnow()
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
