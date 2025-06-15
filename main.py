@@ -156,10 +156,126 @@ class Logger:
             try:
                 channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
                 if channel:
-                    await channel.send(f"```\n{message}\n```")
+                    await channel.send(f"\`\`\`\n{message}\n\`\`\`")
             except Exception as e:
                 print(f"Error sending admin log: {e}")
 
+# =========================[ COPY KEYS BUTTON VIEW ]=========================
+class CopyKeysView(discord.ui.View):
+    def __init__(self, keys: list[str]):
+        super().__init__(timeout=180)
+        self.keys = keys
+
+    @discord.ui.button(label="📋 Copy all keys", style=discord.ButtonStyle.primary)
+    async def copy_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        all_keys = "\n".join(self.keys)
+        await interaction.response.send_message(f"> Generated license keys:\n\`\`\`{all_keys}\`\`\`\n", ephemeral=True)
+
+# =========================[ CONFIRM GENERATE VIEW ]=========================
+class ConfirmGenerateView(discord.ui.View):
+    def __init__(self, user_id: int, product: str, duration: str, quantity: int, 
+                 base_price: float, total_cost: float, discount: float):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.product = product
+        self.duration = duration
+        self.quantity = quantity
+        self.base_price = base_price
+        self.total_cost = total_cost
+        self.discount = discount
+
+    @discord.ui.button(label="🔑 Generate Keys", style=discord.ButtonStyle.success)
+    async def generate_keys(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You cannot confirm this generation.", ephemeral=True)
+            return
+
+        current_balance = (await DataManager.get_user_data(str(self.user_id)))["balance"]
+        if current_balance < self.total_cost:
+            embed = discord.Embed(
+                title="❌ Insufficient Balance",
+                description="Your balance is insufficient.",
+                color=discord.Color.red()
+            )
+            embed.timestamp = discord.utils.utcnow()
+            embed.set_footer(text="Powered by MyBot")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Check stock
+        stock_count = await StockManager.get_stock_count(self.product, self.duration)
+        if stock_count < self.quantity:
+            embed = discord.Embed(
+                title="❌ Insufficient Stock",
+                description=f"Requested: **{self.quantity}**, Available: **{stock_count}**",
+                color=discord.Color.red()
+            )
+            embed.timestamp = discord.utils.utcnow()
+            embed.set_footer(text="Powered by MyBot")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Pull keys
+        keys = await StockManager.pull_keys(self.product, self.duration, self.quantity)
+        if len(keys) != self.quantity:
+            embed = discord.Embed(
+                title="❌ Error Pulling Keys",
+                description="Error pulling keys from stock",
+                color=discord.Color.red()
+            )
+            embed.timestamp = discord.utils.utcnow()
+            embed.set_footer(text="Powered by MyBot")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Deduct balance and update stats
+        user_data = await DataManager.get_user_data(str(self.user_id))
+        user_data["balance"] -= self.total_cost
+        user_data["total_keys"] += self.quantity
+        await DataManager.update_user_data(str(self.user_id), user_data)
+
+        # Create result embed matching your style
+        result_embed = discord.Embed(
+            title="✅ License Keys Generated",
+            description="Your license keys have been generated successfully!",
+            color=discord.Color.green()
+        )
+        
+        # Add each key as a separate field (matching your style)
+        for i, key in enumerate(keys):
+            result_embed.add_field(
+                name=f"Key {i+1}",
+                value=f"\n\`\`\`{key}\`\`\`\n",
+                inline=False
+            )
+        
+        result_embed.add_field(name="⏱️ Duration", value=self.duration, inline=True)
+        result_embed.add_field(name="💰 Total Cost", value=f"${self.total_cost:.2f}", inline=True)
+        result_embed.add_field(name="💸 New Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        
+        result_embed.set_footer(text="Thank you for using our service!")
+        result_embed.timestamp = discord.utils.utcnow()
+        
+        view = CopyKeysView(keys)
+        await interaction.response.send_message(embed=result_embed, view=view, ephemeral=True)
+        
+        # Log the transaction
+        log_message = f"Generated {self.quantity}x {self.product} {self.duration} - Total: ${self.total_cost:.2f} ({self.discount}% discount applied)"
+        await Logger.log_user_action(str(self.user_id), log_message)
+        
+        # Admin log
+        keys_text = "\n".join([f"- {key}" for key in keys])
+        admin_log = f"[KEYS GENERATED]\nUser: {interaction.user}\nProduct: {self.product}\nDuration: {self.duration}\nQuantity: {self.quantity}\nTotal: ${self.total_cost:.2f} ({self.discount}% discount applied)\nRemaining Balance: ${user_data['balance']:.2f}\nKeys:\n{keys_text}"
+        await Logger.send_admin_log(bot, admin_log)
+
+    @discord.ui.button(label="❌ Cancel Generation", style=discord.ButtonStyle.secondary)
+    async def cancel_generation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You cannot cancel this generation.", ephemeral=True)
+            return
+        await interaction.response.send_message("License generation cancelled.", ephemeral=True)
+
+# =========================[ PAGINATOR VIEW ]=========================
 def is_admin():
     async def predicate(interaction: discord.Interaction) -> bool:
         return any(role.name == ADMIN_ROLE for role in interaction.user.roles)
@@ -174,7 +290,59 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-# Admin Commands
+# =========================[ BALANCE SYSTEM COMMAND ]=========================
+@bot.tree.command(name="my_balance", description="Check your current balance 💰")
+async def my_balance(interaction: discord.Interaction):
+    user_data = await DataManager.get_user_data(str(interaction.user.id))
+    embed = discord.Embed(
+        title="💰 Your Balance",
+        description=f"${user_data['balance']:.2f}",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Total Keys Generated", value=str(user_data['total_keys']), inline=True)
+    embed.add_field(name="Discount", value=f"{user_data['discount']}%", inline=True)
+    embed.timestamp = discord.utils.utcnow()
+    embed.set_footer(text="Powered by MyBot")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# =========================[ PRICES COMMAND ]=========================
+@bot.tree.command(name="prices", description="View all current prices 💲")
+async def prices(interaction: discord.Interaction):
+    try:
+        config = await DataManager.get_config()
+        user_data = await DataManager.get_user_data(str(interaction.user.id))
+        
+        embed = discord.Embed(
+            title="🔖 Prices",
+            description="License prices after discount",
+            color=discord.Color.blue()
+        )
+        
+        for product, durations in config.items():
+            price_info = []
+            for duration, price in durations.items():
+                if user_data["discount"] > 0:
+                    discounted_price = price * (100 - user_data["discount"]) / 100
+                    price_info.append(f"> Price: ${discounted_price:.2f}\n> Duration: {duration}")
+                else:
+                    price_info.append(f"> Price: ${price:.2f}\n> Duration: {duration}")
+            
+            embed.add_field(
+                name=f"**{product}**",
+                value="\n".join(price_info),
+                inline=False
+            )
+        
+        if user_data["discount"] > 0:
+            embed.set_footer(text=f"Discount: {user_data['discount']}% applied")
+        else:
+            embed.set_footer(text="No discount applied")
+        
+        embed.timestamp = discord.utils.utcnow()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error getting prices: {str(e)}")
+
 @bot.tree.command(name="add_product", description="Add a new product with durations")
 @app_commands.describe(name="Product name", durations="Comma-separated durations (e.g., 1Day,1Week,1Month)")
 @is_admin()
@@ -336,46 +504,23 @@ async def generate(interaction: discord.Interaction, product: str, duration: str
         discount_multiplier = (100 - user_data["discount"]) / 100
         total_cost = base_price * quantity * discount_multiplier
         
-        # Check balance
-        if user_data["balance"] < total_cost:
-            await interaction.response.send_message(f"❌ Insufficient balance. Need **${total_cost:.2f}**, have **${user_data['balance']:.2f}**")
-            return
+        # Confirm generation
+        view = ConfirmGenerateView(interaction.user.id, product, duration, quantity, base_price, total_cost, user_data["discount"])
         
-        # Check stock
-        stock_count = await StockManager.get_stock_count(product, duration)
-        if stock_count < quantity:
-            await interaction.response.send_message(f"❌ Insufficient stock. Requested: **{quantity}**, Available: **{stock_count}**")
-            return
-        
-        # Pull keys
-        keys = await StockManager.pull_keys(product, duration, quantity)
-        if len(keys) != quantity:
-            await interaction.response.send_message("❌ Error pulling keys from stock")
-            return
-        
-        # Deduct balance and update stats
-        user_data["balance"] -= total_cost
-        user_data["total_keys"] += quantity
-        await DataManager.update_user_data(str(interaction.user.id), user_data)
-        
-        # Create response
-        keys_text = "\n".join([f"- {key}" for key in keys])
-        embed = discord.Embed(title="🔑 Keys Generated", color=0x00ff00)
-        embed.add_field(name="Product", value=f"{product} {duration}", inline=True)
+        embed = discord.Embed(
+            title="🔑 Confirm License Generation",
+            description=f"Are you sure you want to generate **{quantity}x {product} {duration}** licenses?",
+            color=discord.Color.yellow()
+        )
+        embed.add_field(name="Base Price", value=f"${base_price:.2f} each", inline=True)
         embed.add_field(name="Quantity", value=str(quantity), inline=True)
+        embed.add_field(name="Discount", value=f"{user_data['discount']}%", inline=True)
         embed.add_field(name="Total Cost", value=f"${total_cost:.2f}", inline=True)
-        embed.add_field(name="Remaining Balance", value=f"${user_data['balance']:.2f}", inline=True)
-        embed.add_field(name="Keys", value=keys_text, inline=False)
+        embed.add_field(name="Your Balance", value=f"${user_data['balance']:.2f}", inline=True)
+        embed.set_footer(text="Powered by MyBot")
+        embed.timestamp = discord.utils.utcnow()
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-        # Log the transaction
-        log_message = f"Generated {quantity}x {product} {duration} - Total: ${total_cost:.2f} ({user_data['discount']}% discount applied)"
-        await Logger.log_user_action(str(interaction.user.id), log_message)
-        
-        # Admin log
-        admin_log = f"[KEYS GENERATED]\nUser: {interaction.user}\nProduct: {product}\nDuration: {duration}\nQuantity: {quantity}\nTotal: ${total_cost:.2f} ({user_data['discount']}% discount applied)\nRemaining Balance: ${user_data['balance']:.2f}\nKeys:\n{keys_text}"
-        await Logger.send_admin_log(bot, admin_log)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         
     except Exception as e:
         await interaction.response.send_message(f"❌ Error generating keys: {str(e)}")
@@ -464,7 +609,7 @@ async def generate_history(interaction: discord.Interaction):
             file = discord.File(log_file, filename=f"purchase_history_{interaction.user.id}.txt")
             await interaction.response.send_message("📋 Your purchase history:", file=file, ephemeral=True)
         else:
-            await interaction.response.send_message(f"📋 **Your Purchase History:**\n```\n{content}\n```", ephemeral=True)
+            await interaction.response.send_message(f"📋 **Your Purchase History:**\n\`\`\`\n{content}\n\`\`\`", ephemeral=True)
             
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting history: {str(e)}")
